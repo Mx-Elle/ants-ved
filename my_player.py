@@ -1,8 +1,10 @@
-from multiprocessing import Queue
 from random import choice
 from board import Entity, neighbors
 import numpy as np
 import numpy.typing as npt
+
+
+AntMove = tuple[tuple[int, int], tuple[int, int]]
 
 
 def valid_neighbors(
@@ -11,7 +13,7 @@ def valid_neighbors(
     return [n for n in neighbors((row, col), walls.shape) if not walls[n]]
 
 
-class myBot:
+class MyBot:
 
     def __init__(
         self,
@@ -31,7 +33,7 @@ class myBot:
 
     @property
     def name(self):
-        return "rando"
+        return "ved"
 
 
 
@@ -80,7 +82,7 @@ class myBot:
         
         my_size = len(my_cluster)
         enemy_size = len(enemy_cluster)
-        if my_size >= enemy_size:#+3
+        if my_size >= enemy_size:   #+3
             return "collapse"
         if my_size < enemy_size:
             return "deny"
@@ -94,7 +96,7 @@ class myBot:
                 roles[ant] = "fighter"
 
             else:
-                if mode == "defend":
+                if mode == "deny":
                     roles[ant] = "deny_food"
                 else:
                     roles[ant] = "harvest"
@@ -124,13 +126,12 @@ class myBot:
                 close_ants.append(ant)
         return count, close_ants
 
-    def move_fighter(self, ant, enemy_ants, my_ants, enemy_hills, enemy_cluster, mode):
+    def move_fighter(self, ant, enemy_ants, my_ants, enemy_hills, mode, valid): 
 
-        possible_neighbors = valid_neighbors(*ant, self.walls)
         best_pos = ant
         best_score = -float('inf')
         
-        for next_pos in possible_neighbors:
+        for next_pos in valid:
 
             friendly_count = self.count_in_radius(next_pos, my_ants, self.battle_radius)[0] 
             enemy_count = self.count_in_radius(next_pos, enemy_ants, self.battle_radius)[0]
@@ -138,7 +139,7 @@ class myBot:
             if friendly_count > enemy_count:
                 score = 10 + (friendly_count - enemy_count)
             elif friendly_count == enemy_count:
-                score = -2  
+                score = 2  
             else:
                 score = -10 - (enemy_count - friendly_count)
 
@@ -153,23 +154,21 @@ class myBot:
 
         return best_pos
 
-    def move_harvester(self, ant, food, my_ants):
+    def move_harvester(self, ant, food, valid): 
         if not food:
-            return choice(valid_neighbors(*ant, self.walls))
+            return choice(valid)
         closest_food = min(food, key=lambda f: abs(f[0]-ant[0])+abs(f[1]-ant[1]))
-        best_pos = ant
-        best_distance = float('inf')
 
         return min(
-        valid_neighbors(*ant, self.walls),
+        valid,
         key=lambda n: abs(n[0] - closest_food[0]) + abs(n[1] - closest_food[1])
         )
     
-    def score_food(self, meal, my_ants, enemy_ants):
+    def score_food(self, meal, ant,  my_ants, enemy_ants):
         if not enemy_ants:
             return -float('inf')
         
-        my_dist = min(abs(meal[0]-ant[0])+abs(meal[1]-ant[1]) for ant in my_ants)
+        my_dist = abs(meal[0] - ant[0]) + abs(meal[1] - ant[1])
         enemy_dist = min(abs(meal[0]-ant[0])+abs(meal[1]-ant[1]) for ant in enemy_ants)
         difference = my_dist - enemy_dist
 
@@ -177,28 +176,27 @@ class myBot:
             return difference - 0.1*my_dist
         return -float('inf')
     
-    def move_deny(self, ant, my_ants, enemy_ants, food):
+    def move_deny(self, ant, my_ants, enemy_ants, food, valid):
 
         if not food:
-            return choice(valid_neighbors(*ant, self.walls))
+            return choice(valid)
         
         best_food = None
         best_score = -float('inf')
         for meal in food: 
-            score = self.score_food(meal, my_ants, enemy_ants)
+            score = self.score_food(meal, ant, my_ants, enemy_ants)
 
             if score > best_score:
                 best_score = score
                 best_food = meal
         if best_food is None:
-            return choice(valid_neighbors(*ant, self.walls))
+            return choice(valid)
         
-        possible_neighbors = valid_neighbors(*ant, self.walls)
 
         best_pos = ant
         best_dist = float('inf')
 
-        for next_pos in possible_neighbors:
+        for next_pos in valid:
             dist = abs(next_pos[0]-best_food[0])+abs(next_pos[1]-best_food[1])
 
             friendly_count = self.count_in_radius(next_pos, my_ants, self.battle_radius)[0]
@@ -220,17 +218,14 @@ class myBot:
         self,
         vision: set[tuple[tuple[int, int], Entity]],
         stored_food: int,
-        move_queue: Queue,
     ):
         my_ants = {coord for coord, kind in vision if kind == Entity.FRIENDLY_ANT}
         my_hills = {coord for coord, kind in vision if kind == Entity.FRIENDLY_HILL}
         enemy_ants = {coord for coord, kind in vision if kind == Entity.ENEMY_ANT}
-        enemy_hills = []
-        for hill in my_hills:
-            enemy_hills.append((100-1-hill[0], 100-1-hill[1]))
+        enemy_hills = {coord for coord, kind in vision if kind == Entity.ENEMY_HILL}
 
         food = {coord for coord, kind in vision if kind == Entity.FOOD}
-        claimed_destinations = my_hills
+        claimed_destinations = set(my_ants) | my_hills
 
         my_clusters = self.detect_clusters(my_ants)
         enemy_clusters = self.detect_clusters(enemy_ants)
@@ -238,19 +233,37 @@ class myBot:
         enemy_main_cluster = self.find_largest_cluster(enemy_clusters)
         mode = self.determine_mode(main_cluster, enemy_main_cluster)
         roles = self.determine_roles(my_ants, main_cluster, mode)
+        out = set()
 
-
-
-        
-        for ant in my_ants:
-            valid = [
-                v
-                for v in valid_neighbors(*ant, self.walls)
+        for ant in sorted(my_ants, key=lambda a: roles[a] != "fighter"):
+            valid = [v for v in valid_neighbors(*ant, self.walls)
                 if v not in claimed_destinations
             ]
-            if not valid:
-                claimed_destinations.add(ant)
-                continue
-            dest = choice(valid)
+
+            dest = ant 
+            if valid: 
+                if roles[ant] == "fighter":
+                    dest = self.move_fighter(ant, enemy_ants, my_ants, enemy_hills, mode, valid) 
+                elif roles[ant] == "harvest":
+                    dest = self.move_harvester(ant, food, valid)
+                else:
+                    dest = self.move_deny(ant, my_ants, enemy_ants, food, valid)
+                
+                if dest not in valid:
+                    dest = ant
+            
+            #dest = choice(valid)
+
+            claimed_destinations.remove(ant)
+            if dest in claimed_destinations:
+                dest = ant
             claimed_destinations.add(dest)
-            move_queue.put((ant, dest))
+            out.add((ant, dest))
+
+            #ant is claiming destination where another ant is(empty in claimed_destinations) but that ant can't move so they end up getting destroyed
+            
+
+
+                
+
+        return out
